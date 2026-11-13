@@ -202,6 +202,11 @@ ifeq ($(BUILD_MODE),debug)
 OPT_FLAGS := -Og -g3 -fno-omit-frame-pointer
 else
 OPT_FLAGS := -O3
+# LTO is skipped on macOS and FreeBSD, where the host toolchain's LTO plugin
+# is unreliable for this tree.
+ifeq ($(filter DARWIN FREEBSD,$(ARCH)),)
+OPT_FLAGS += -flto
+endif
 endif
 COMMON_FLAGS = $(ARCH_CFLAGS) -pthread $(PIC_FLAGS) -std=c11 $(FEATURE_FLAGS) $(OPT_FLAGS) -D_FORTIFY_SOURCE=2 -ffunction-sections -fdata-sections -fno-common -Wfatal-errors $(WARN_FLAGS)
 
@@ -1076,7 +1081,7 @@ $(BUILD_DIR)/%.h $(BUILD_DIR)/%.o: %.psr $(PSR)
 
 clean distclean:
 	@echo '===> CLEAN'
-	$(Q)rm -fr $(BUILD_DIR) $(BINARY) zsnes zsnes.exe
+	$(Q)rm -fr $(BUILD_DIR) $(BUILD_DIR)-align $(BINARY) zsnes zsnes.exe
 
 info:
 	@echo "ARCH          = $(ARCH)"
@@ -1111,8 +1116,9 @@ fmt:
 test: $(BINARY)
 	$(MAKE) -C test run
 
-asmalign: $(BINARY)
-	$(PYTHON) tools/asmalign.py $(BUILD_DIR)
+asmalign:
+	$(Q)$(MAKE) BUILD_DIR=$(BUILD_DIR)-align OPT_FLAGS='$(OPT_FLAGS) -ffat-lto-objects' $(addprefix $(BUILD_DIR)-align/,$(OBJ_NAMES))
+	$(PYTHON) tools/asmalign.py $(BUILD_DIR)-align
 
 # The netplay relay (server/, Go): pairs two clients by room code and forwards
 # their input frames. Not part of `all`.

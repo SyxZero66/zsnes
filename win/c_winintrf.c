@@ -10,17 +10,15 @@
 #include "../gblvars.h"
 #include "../gui/c_gui.h"
 #include "../intrf.h"
+#include "../length.h"
 #include "../link.h"
-#include "cfg.h"
-#include "input.h"
-#ifndef lengthof
-#define lengthof(x) (sizeof(x) / sizeof *(x))
-#endif
 #include "../ui.h"
 #include "../vcache.h"
 #include "../video/c_2xsaiw.h"
 #include "../video/newgfx16.h"
 #include "c_winintrf.h"
+#include "cfg.h"
+#include "input.h"
 
 #ifndef __RELEASE__
 #include "winlink.h"
@@ -327,6 +325,11 @@ void JoyRead(void)
 u4 GamepadReadPlayer(u4 const player)
 {
     (void)player;
+    return 0;
+}
+
+u4 GamepadCount(void)
+{
     return 0;
 }
 

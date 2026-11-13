@@ -71,8 +71,7 @@ Build `zsnes` with debug symbols and debugger-friendly optimization:
 
     make debug
 
-The build-mode stamp automatically replaces incompatible release objects. To
-run the same ROM under GDB:
+For runnin `zsnes` with the same ROM, under GDB:
 
 ```sh
 gdb --args ./zsnes ~/roms/snes/example.sfc
@@ -225,13 +224,12 @@ These are the contributors listed in the text files that are included with the 1
 * Some of the information in the old text files in `docs/readme.txt/*.txt` has not yet been ported over to the `man/zsnes.1` man page or to a Markdown document.
 * The plan is to do this. Pull requests are welcome.
 
-Additional documentation:
+Additional old documentation:
 
-* [olddoc.md](olddoc.md)
-* [html](html)
+* [doc/html](doc/html)
 
 ### General info
 
 * License: GPL2
-* Version: 2.3.8
+* Version: 2.3.9
 * Fork author: Alexander F. Rødseth &lt;xyproto@archlinux.org&gt;

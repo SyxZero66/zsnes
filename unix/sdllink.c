@@ -21,6 +21,7 @@
 #include "../video/filter.h"
 #include "../video/procvidc.h"
 #include "../zip/zpng.h"
+#include "../zmovie.h"
 #include "../zstate.h"
 #include "audio.h"
 #include "cfg.h"
@@ -283,11 +284,27 @@ static int joystick_index_from_id(SDL_JoystickID id)
 {
     int i;
     for (i = 0; i < 5; i++) {
-        if (JoystickInput[i] && JoystickID[i] == id) {
+        /* A slot is occupied by either a raw joystick or a gamepad; both keep
+           their id in JoystickID. Checking only JoystickInput missed gamepad
+           slots, so a gamepad looked unknown: every re-announce re-ran init
+           (the repeated "Device 0" churn) and an unplug was never cleaned up. */
+        if ((JoystickInput[i] || GamepadInput[i]) && JoystickID[i] == id) {
             return i;
         }
     }
     return -1;
+}
+
+static SDL_Gamepad* gamepad_for_player(u4 const player)
+{
+    u4 n = 0;
+    int i;
+    for (i = 0; i < 5; i++) {
+        if (GamepadInput[i] && ++n == player) {
+            return GamepadInput[i];
+        }
+    }
+    return NULL;
 }
 
 /* MOUSE INPUT */
@@ -313,6 +330,8 @@ static uint8_t IsActivated = 1;
 #define UPDATE_TICKS_GAMEPAL (20.0)
 #define UPDATE_TICKS_GUI (1000.0 / 36.0)
 #define UPDATE_TICKS_UDP (1000.0 / 60.0)
+#define GAMEPAD_BINDING_BANK_SIZE 32
+#define GAMEPAD_BUTTON_BINDING_COUNT 20
 
 static int T60HZEnabled = 0;
 u1 T36HZEnabled = 0;
@@ -761,6 +780,56 @@ int Main_Proc(void)
             pressed[offset] = 0;
             break;
         }
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
+            int idx = joystick_index_from_id(event.gbutton.which);
+            if (idx < 0 || !GamepadInput[idx]
+                || event.gbutton.button >= GAMEPAD_BUTTON_BINDING_COUNT) {
+                break;
+            }
+            offset = ButtonOffset[idx] + event.gbutton.button;
+            if (offset >= (256 + 128 + 64)) {
+                break;
+            }
+            pressed[offset] = 1;
+            break;
+        }
+
+        case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+            int idx = joystick_index_from_id(event.gbutton.which);
+            if (idx < 0 || !GamepadInput[idx]
+                || event.gbutton.button >= GAMEPAD_BUTTON_BINDING_COUNT) {
+                break;
+            }
+            offset = ButtonOffset[idx] + event.gbutton.button;
+            if (offset >= (256 + 128 + 64)) {
+                break;
+            }
+            pressed[offset] = 0;
+            break;
+        }
+
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+            int idx = joystick_index_from_id(event.gaxis.which);
+            if (idx < 0 || !GamepadInput[idx]) {
+                break;
+            }
+            offset = AxisOffset[idx] + event.gaxis.axis * 2;
+            if (offset + 2 > (256 + 128 + 64)) {
+                break;
+            }
+            if (event.gaxis.value < -(joy_sensitivity)) {
+                pressed[offset + 1] = 1;
+                pressed[offset] = 0;
+            } else if (event.gaxis.value > joy_sensitivity) {
+                pressed[offset] = 1;
+                pressed[offset + 1] = 0;
+            } else {
+                pressed[offset] = 0;
+                pressed[offset + 1] = 0;
+            }
+            break;
+        }
+
         case SDL_EVENT_JOYSTICK_ADDED:
             /* SDL announces the pads that were already there when the
                subsystem came up; only a genuinely new one needs the slots
@@ -1506,6 +1575,32 @@ static void CloseJoystickInput(void)
     memset(pressed + 256, 0, 128 + 64);
 }
 
+u4 GamepadCount(void)
+{
+    u4 n = 0;
+    int i;
+
+    if (MovieProcessing) {
+        return 0;
+    }
+    for (i = 0; i < 5; i++) {
+        if (GamepadInput[i]) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void UpdateGamepadMultiTap(void)
+{
+    extern u1 MultiTap;
+    extern bool BSEnable;
+
+    if (!BSEnable) {
+        MultiTap = pl12s34 != 1 && (pl3contrl != 0 || pl4contrl != 0 || pl5contrl != 0 || GamepadCount() >= 3);
+    }
+}
+
 BOOL InitJoystickInput(void)
 {
     int i, max_num_joysticks, num_joysticks = 0;
@@ -1519,8 +1614,11 @@ BOOL InitJoystickInput(void)
     SDL_InitSubSystem(SDL_INIT_GAMEPAD);
     ids = SDL_GetJoysticks(&num_joysticks);
     if (!ids || num_joysticks <= 0) {
-        printf("No joysticks found.\n");
+        if (verbose_mode) {
+            printf("No joysticks found.\n");
+        }
         SDL_free(ids);
+        UpdateGamepadMultiTap();
         /* The subsystem stays up: it is what reports a pad plugged in later. */
         return FALSE;
     }
@@ -1529,10 +1627,17 @@ BOOL InitJoystickInput(void)
 
     max_num_joysticks = num_joysticks > 5 ? 5 : num_joysticks;
 
+    /* Each gamepad owns a stable 32-entry binding bank: buttons then axis
+       directions. Keep raw joystick offsets beyond every bank. */
     for (i = 0; i < max_num_joysticks; i++) {
-        /* A recognised gamepad goes through the Gamepad API and drives the
-           SNES directly; only its slot number matters, not raw axis/button
-           counts, so there are no offsets to work out. */
+        if (SDL_IsGamepad(ids[i])) {
+            next_offset = 256 + (i + 1) * GAMEPAD_BINDING_BANK_SIZE;
+        }
+    }
+
+    for (i = 0; i < max_num_joysticks; i++) {
+        /* A recognised gamepad uses the standard Gamepad API mapping for
+           gameplay; its binding ranges are fixed by device slot. */
         if (SDL_IsGamepad(ids[i])) {
             GamepadInput[i] = SDL_OpenGamepad(ids[i]);
             if (!GamepadInput[i]) {
@@ -1540,7 +1645,11 @@ BOOL InitJoystickInput(void)
                 continue;
             }
             JoystickID[i] = ids[i];
-            printf("Device %i %s (gamepad)\n", i, SDL_GetGamepadName(GamepadInput[i]));
+            if (verbose_mode) {
+                printf("Device %i %s (gamepad)\n", i, SDL_GetGamepadName(GamepadInput[i]));
+            }
+            ButtonOffset[i] = 256 + i * GAMEPAD_BINDING_BANK_SIZE;
+            AxisOffset[i] = ButtonOffset[i] + GAMEPAD_BUTTON_BINDING_COUNT;
             continue;
         }
 
@@ -1553,8 +1662,10 @@ BOOL InitJoystickInput(void)
         num_axes = SDL_GetNumJoystickAxes(JoystickInput[i]);
         num_buttons = SDL_GetNumJoystickButtons(JoystickInput[i]);
         num_hats = SDL_GetNumJoystickHats(JoystickInput[i]);
-        printf("Device %i %s\n", i, SDL_GetJoystickName(JoystickInput[i]));
-        printf("  %i axis, %i buttons, %i hats\n", num_axes, num_buttons, num_hats);
+        if (verbose_mode) {
+            printf("Device %i %s\n", i, SDL_GetJoystickName(JoystickInput[i]));
+            printf("  %i axis, %i buttons, %i hats\n", num_axes, num_buttons, num_hats);
+        }
 
         if (next_offset >= 448) {
             printf("Warning: Joystick won't work.\n");
@@ -1572,12 +1683,13 @@ BOOL InitJoystickInput(void)
         }
     }
     SDL_free(ids);
+    UpdateGamepadMultiTap();
 
     return TRUE;
 }
 
-/* The SNES pad bits for a player, read straight from its gamepad (slot
-   player-1). Returns 0 when that slot holds no gamepad, so callers can OR it in
+/* The SNES pad bits for a player, read straight from the player-th open
+   gamepad. Returns 0 when there is no such gamepad, so callers can OR it in
    unconditionally. The layout is the one every SNES emulator uses: the face
    buttons by position, shoulders and triggers both reaching L and R, and the
    left stick standing in for the D-pad. */
@@ -1590,7 +1702,7 @@ u4 GamepadReadPlayer(u4 const player)
     if (player < 1 || player > 5) {
         return 0;
     }
-    gp = GamepadInput[player - 1];
+    gp = gamepad_for_player(player);
     if (!gp || !SDL_GamepadConnected(gp)) {
         return 0;
     }
@@ -2217,9 +2329,9 @@ void DoRumble(void)
     if ((RumbleData & 0xFF00) == 0x7200) {
         u2 RumbleLeft = ((RumbleData & 0x000F) * 4369);
         u2 RumbleRight = (((RumbleData & 0x00F0) >> 4) * 4369);
-        if (GamepadInput[0]) {
-            SDL_RumbleGamepad(GamepadInput[0], RumbleLeft, RumbleRight, 600);
-        } else {
+        if (gamepad_for_player(1)) {
+            SDL_RumbleGamepad(gamepad_for_player(1), RumbleLeft, RumbleRight, 600);
+        } else if (JoystickInput[0]) {
             SDL_RumbleJoystick(JoystickInput[0], RumbleLeft, RumbleRight, 600);
         }
         RumbleData = 0;
@@ -2421,14 +2533,10 @@ void UpdateVFrame(void)
 
     if (SNESRumble && !MultiTap) {
         DoRumble();
-    } else if (GamepadInput[0]) {
-        SDL_RumbleGamepad(GamepadInput[0], 0, 0, 1); // Stop vibration
-    } else {
+    } else if (gamepad_for_player(1)) {
+        SDL_RumbleGamepad(gamepad_for_player(1), 0, 0, 1); // Stop vibration
+    } else if (JoystickInput[0]) {
         SDL_RumbleJoystick(JoystickInput[0], 0, 0, 1); // Stop vibration
-    }
-
-    if (sound_sdl) {
-        SoundWrite_sdl();
     }
 }
 
@@ -2523,22 +2631,22 @@ void ZSnesFrameDumpSurface(SDL_Surface* const s, char const* const tag)
 
 void drawscreenwin(void)
 {
-#if defined(__LIBAO__) || defined(__PIPEWIRE__)
     extern bool RawDumpInProgress;
-    if (!sound_sdl && !GUIOn2 && !GUIOn && !EMUPause && !RawDumpInProgress) {
+    if (!GUIOn2 && !GUIOn && !EMUPause && !RawDumpInProgress) {
+        if (sound_sdl) {
+            SoundWrite_sdl();
+        }
 #ifdef __PIPEWIRE__
-        if (sound_pipewire) {
+        else if (sound_pipewire) {
             SoundWrite_pipewire();
         }
 #endif
 #ifdef __LIBAO__
-#ifdef __PIPEWIRE__
-        else
-#endif
+        else {
             SoundWrite_ao();
+        }
 #endif
     }
-#endif
 
     /* Just in case - DDOI */
     if (sdl_state == vid_none) {
